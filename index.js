@@ -2,6 +2,7 @@ const express = require('express');
 const app = express();
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
 require('dotenv').config();
 const { MongoClient, ServerApiVersion } = require('mongodb');
 
@@ -26,8 +27,45 @@ async function run() {
     try {
         // Connect the client to the server	(optional starting in v4.7)
         await client.connect();
-        
-        
+
+        const usersCollection = client.db("takaflow").collection("users");
+
+        // Register User
+        app.post('/register', async (req, res) => {
+
+            const { email, userName, phoneNum, role, pin, photoUrl, createdAt, approvedBy } = req.body;
+
+            try {
+                const userExists = await usersCollection.findOne({
+                    $or: [{ phoneNum }, { email }]
+                });
+
+                if (userExists) {
+                    return res.status(400).send({ message: 'User already exists' });
+                }
+
+                const hashedPin = await bcrypt.hash(pin, 10);
+
+                const newUser = {
+                    name: userName,
+                    email: email,
+                    phoneNum: phoneNum,
+                    role: role,
+                    pin: hashedPin,
+                    photoUrl: photoUrl,
+                    createdAt: createdAt,
+                    approvedBy: approvedBy,
+                    status: 'pending', // initial status pending
+                    balance: 0, // initial balance
+                };
+
+                const result = await usersCollection.insertOne(newUser);
+
+                res.status(201).send(result);
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
 
         // Send a ping to confirm a successful connection
         await client.db("admin").command({ ping: 1 });
