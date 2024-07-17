@@ -30,6 +30,56 @@ async function run() {
 
         const usersCollection = client.db("takaflow").collection("users");
 
+        // Middleware to Verify Tokens
+        const verifyToken = (req, res, next) => {
+            if (!req.headers.authorization) {
+                return res.status(401).send({ message: 'unauthorized access' });
+            }
+            const token = req.headers.authorization.split(' ')[1];
+            jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+                if (err) {
+                    return res.status(401).send({ message: 'unauthorized access' });
+                }
+                req.decoded = decoded;
+                next();
+            });
+        };
+
+        // Login Endpoint
+        app.post('/login', async (req, res) => {
+            const { emailOrPhone, pin } = req.body;
+
+            try {
+                const user = await usersCollection.findOne({
+                    $or: [
+                        { email: emailOrPhone },
+                        { phoneNum: emailOrPhone }
+                    ]
+                });
+                console.log(user)
+
+                if (!user) {
+                    return res.status(401).json({ status: 'error', message: 'Invalid credentials' });
+                }
+
+                const isMatch = await bcrypt.compare(pin.toString(), user.pin);
+                if (!isMatch) {
+                    return res.status(401).json({ status: 'error', message: 'Invalid credentials' });
+                }
+
+                const token = jwt.sign({ id: user._id, role: user.role }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
+
+                res.json({
+                    status: 'success',
+                    token,
+                    user
+                });
+            } catch (error) {
+                res.status(500).json({ status: 'error', message: 'Server error', error });
+            }
+        });
+
+
         // Register User
         app.post('/register', async (req, res) => {
 
