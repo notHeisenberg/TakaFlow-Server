@@ -4,9 +4,9 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 require('dotenv').config();
-const { MongoClient, ServerApiVersion } = require('mongodb');
+const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 4000;
 
 app.use(cors());
 
@@ -41,9 +41,28 @@ async function run() {
                     return res.status(401).send({ message: 'unauthorized access' });
                 }
                 req.decoded = decoded;
+
                 next();
             });
         };
+
+        const verifyAdmin = (req, res, next) => {
+            if (!req.headers.authorization) {
+                return res.status(401).send({ message: 'unauthorized access' });
+            }
+            const token = req.headers.authorization.split(' ')[1];
+            jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+                if (err) {
+                    return res.status(401).send({ message: 'unauthorized access' });
+                }
+                if (decoded.role !== 'admin') {
+                    return res.status(403).send({ message: 'Forbidden access' });
+                }
+                req.decoded = decoded;
+
+                next();
+            });
+        }
 
         // Login Endpoint
         app.post('/login', async (req, res) => {
@@ -56,23 +75,33 @@ async function run() {
                         { phoneNum: emailOrPhone }
                     ]
                 });
-                console.log(user)
+
 
                 if (!user) {
-                    return res.status(401).json({ status: 'error', message: 'Invalid credentials' });
+                    return res.status(401).json({ status: 'error', message: 'Invalid Email/PhoneNum' });
                 }
 
                 const isMatch = await bcrypt.compare(pin.toString(), user.pin);
                 if (!isMatch) {
-                    return res.status(401).json({ status: 'error', message: 'Invalid credentials' });
+                    return res.status(401).json({ status: 'error', message: 'Invalid Pin' });
                 }
 
-                const token = jwt.sign({ id: user._id, role: user.role }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
+                const token = jwt.sign({ id: user._id, role: user.role, email: user.email }, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
 
-                res.json({
+                res.status(200).json({
                     status: 'success',
                     token,
-                    user
+                    user: {
+                        id: user._id,
+                        name: user.name,
+                        email: user.email,
+                        phoneNum: user.phoneNum,
+                        role: user.role,
+                        photoUrl: user.photoUrl,
+                        status: user.status,
+                        balance: user.balance
+                    },
+                    message: 'Login successful'
                 });
             } catch (error) {
                 res.status(500).json({ status: 'error', message: 'Server error', error });
@@ -112,6 +141,97 @@ async function run() {
                 const result = await usersCollection.insertOne(newUser);
 
                 res.status(201).send(result);
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
+
+        app.patch('/update-profile', verifyToken, async (req, res) => {
+            const { name, phoneNum, photoUrl, pin } = req.body;
+            const { id } = req.decoded;
+
+            try {
+                const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+
+                const isMatch = await bcrypt.compare(pin.toString(), user.pin);
+                if (!isMatch) {
+                    return res.status(400).json({ status: 'error', message: 'Invalid Pin' });
+                }
+
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            name,
+                            phoneNum,
+                            photoUrl
+                        }
+                    }
+                );
+
+                res.status(200).send(result);
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
+
+        // Done - Update Status
+        app.patch('/users/:id', verifyAdmin, async (req, res) => {
+            const { status } = req.body;
+            const { id } = req.params;
+
+            try {
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            status
+                        }
+                    }
+                );
+
+                res.status(200).send(result);
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
+
+        // TO-DO - Update Pin
+        app.patch('/update-pin', verifyToken, async (req, res) => {
+            const { oldPin, newPin } = req.body;
+            const { id } = req.decoded;
+
+            try {
+                const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+
+                const isMatch = await bcrypt.compare(oldPin.toString(), user.pin);
+                if (!isMatch) {
+                    return res.status(400).json({ status: 'error', message: 'Invalid Pin' });
+                }
+
+                const hashedPin = await bcrypt.hash(newPin, 10);
+
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            pin: hashedPin
+                        }
+                    }
+                );
+
+                res.status(200).send(result);
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
+
+        // Get All Users
+        app.get('/users', verifyAdmin, async (req, res) => {
+            try {
+                const users = await usersCollection.find({ role: { $ne: 'admin' } }).toArray();
+
+                res.status(200).send(users);
             } catch (error) {
                 res.status(500).send({ message: 'Server error', error });
             }
