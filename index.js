@@ -8,7 +8,15 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 
 const port = process.env.PORT || 4000;
 
-app.use(cors());
+app.use(cors(
+    {
+        origin: [
+            "http://localhost:5173",
+            "https://easytaka-mfs.netlify.app"
+
+        ]
+    }
+));
 
 app.use(express.json());
 
@@ -29,6 +37,7 @@ async function run() {
         await client.connect();
 
         const usersCollection = client.db("takaflow").collection("users");
+        const transactionsCollection = client.db("takaflow").collection("transactions");
 
         // Middleware to Verify Tokens
         const verifyToken = (req, res, next) => {
@@ -181,16 +190,30 @@ async function run() {
             const { id } = req.params;
 
             try {
-                const result = await usersCollection.updateOne(
-                    { _id: new ObjectId(id) },
-                    {
-                        $set: {
-                            status
+                if (status === 'active') {
+                    const result = await usersCollection.updateOne(
+                        { _id: new ObjectId(id) },
+                        {
+                            $set: {
+                                status,
+                                balance: 40
+                            }
                         }
-                    }
-                );
+                    );
 
-                res.status(200).send(result);
+                    res.status(200).send(result);
+                } else if (status === 'blocked') {
+                    const result = await usersCollection.updateOne(
+                        { _id: new ObjectId(id) },
+                        {
+                            $set: {
+                                status
+                            }
+                        }
+                    );
+
+                    res.status(200).send(result);
+                }
             } catch (error) {
                 res.status(500).send({ message: 'Server error', error });
             }
@@ -232,6 +255,163 @@ async function run() {
                 const users = await usersCollection.find({ role: { $ne: 'admin' } }).toArray();
 
                 res.status(200).send(users);
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
+
+        // Get User ballance By email
+        app.get('/users/:email', verifyToken, async (req, res) => {
+            const { email } = req.params; 
+
+
+            try {
+                const user = await usersCollection.findOne({ email });
+
+                res.status(200).send({
+                    user: {
+                        id: user._id,
+                        name: user.name,
+                        email: user.email,
+                        phoneNum: user.phoneNum,
+                        role: user.role,
+                        photoUrl: user.photoUrl,
+                        status: user.status,
+                        balance: user.balance
+                    }
+                });
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
+
+        // Send Money
+        app.post('/send-money', verifyToken, async (req, res) => {
+            const { amount, receiverEmail, pin } = req.body;
+            const { id } = req.decoded;
+
+            try {
+                const sender = await usersCollection.findOne({ _id: new ObjectId(id) });
+                const receiver = await usersCollection.findOne({ email: receiverEmail });
+
+                if (!receiver || receiver.status === 'pending' || receiver.role === 'admin' || receiver.role === 'agent') {
+                    return res.status(404).send({ message: 'User not found' });
+                }
+
+                const isMatch = await bcrypt.compare(pin.toString(), sender.pin);
+                if (!isMatch) {
+                    return res.status(400).json({ status: 'error', message: 'Invalid Pin' });
+                }
+
+                if (sender.balance < amount) {
+                    return res.status(406).send({ message: 'Insufficient balance' });
+                }
+
+                const session = client.startSession();
+                session.startTransaction();
+
+                try {
+                    if (sender._id.toString() === receiver._id.toString()) {
+                        return res.status(405).send({ message: 'You cannot send money to yourself' });
+                    }
+
+                    const senderBalance = amount > 100 ? sender.balance - amount - 5 : sender.balance - amount;
+                    const receiverBalance = receiver.balance + amount;
+
+                    const updateSender = usersCollection.updateOne(
+                        { _id: new ObjectId(id) },
+                        { $set: { balance: senderBalance } },
+                        { session }
+                    );
+
+                    const updateReceiver = usersCollection.updateOne(
+                        { email: receiverEmail },
+                        { $set: { balance: receiverBalance } },
+                        { session }
+                    );
+
+                    const generateTransactionId = () => {
+                        const chars = '0123456789';
+                        let transId = '';
+                        for (let i = 0; i < 10; i++) {
+                            transId += chars.charAt(Math.floor(Math.random() * chars.length));
+                        }
+                        return transId;
+                    }
+
+                    const transactionID = generateTransactionId();
+
+                    const transaction = {
+                        senderInfo: {
+                            name: sender.name,
+                            email: sender.email,
+                            phoneNum: sender.phoneNum,
+                        },
+                        receiverInfo: {
+                            name: receiver.name,
+                            email: receiver.email,
+                            phoneNum: receiver.phoneNum,
+                        },
+                        amount,
+                        transactionType: 'send-money',
+                        transactionId: transactionID,
+                        status: 'success',
+                        createdAt: new Date()
+                    };
+
+                    const createTransaction = transactionsCollection.insertOne(transaction, { session });
+
+                    await Promise.all([updateSender, updateReceiver, createTransaction]);
+
+                    await session.commitTransaction();
+                    session.endSession();
+
+                    res.status(200).send({ message: 'Transaction successful', transaction });
+                } catch (error) {
+                    await session.abortTransaction();
+                    session.endSession();
+                    res.status(500).send({ message: 'Transaction failed', error });
+                }
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
+
+        // Get All Transactions
+        app.get('/transactions', verifyAdmin, async (req, res) => {
+            try {
+                const transactions = await transactionsCollection.find().toArray();
+
+                res.status(200).send(transactions);
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
+
+        // Get User Transactions
+        app.get('/user-transactions', verifyToken, async (req, res) => {
+            const { id,role } = req.decoded;
+
+            try {
+                if (role === 'agent') {
+                    const userTransactions = await transactionsCollection.find({
+                        $or: [
+                            { 'senderInfo.email': req.decoded.email },
+                            { 'receiverInfo.email': req.decoded.email }
+                        ]
+                    }).sort({ createdAt: -1 }).toArray();
+                    return res.status(200).limit(10).send(userTransactions);
+                }
+                else {
+                    const userTransactions = await transactionsCollection.find({
+                        $or: [
+                            { 'senderInfo.email': req.decoded.email },
+                            { 'receiverInfo.email': req.decoded.email }
+                        ]
+                    }).sort({ createdAt: -1 }).limit(20).toArray();
+                    return res.status(200).send(userTransactions);
+                }
+                
             } catch (error) {
                 res.status(500).send({ message: 'Server error', error });
             }
