@@ -101,7 +101,7 @@ async function run() {
                     status: 'success',
                     token,
                     user: {
-                        id: user._id,
+                        _id: user._id,
                         name: user.name,
                         email: user.email,
                         phoneNum: user.phoneNum,
@@ -144,7 +144,7 @@ async function run() {
                     createdAt: createdAt,
                     approvedBy: approvedBy,
                     status: 'pending', // initial status pending
-                    balance: 0, // initial balance
+                    balance: parseFloat(0).toFixed(2), // initial balance
                 };
 
                 const result = await usersCollection.insertOne(newUser);
@@ -196,7 +196,8 @@ async function run() {
                         {
                             $set: {
                                 status,
-                                balance: 40
+                                balance: 40,
+                                approvedBy: req.decoded.email
                             }
                         }
                     );
@@ -262,7 +263,7 @@ async function run() {
 
         // Get User ballance By email
         app.get('/users/:email', verifyToken, async (req, res) => {
-            const { email } = req.params; 
+            const { email } = req.params;
 
 
             try {
@@ -366,11 +367,132 @@ async function run() {
                     await session.commitTransaction();
                     session.endSession();
 
-                    res.status(200).send({ message: 'Transaction successful', transaction });
+                    const updatedUser = await usersCollection.findOne(
+                        { _id: new ObjectId(id) },
+                        {
+                            projection: {
+                                id: 1,
+                                name: 1,
+                                email: 1,
+                                phoneNum: 1,
+                                role: 1,
+                                photoUrl: 1,
+                                status: 1,
+                                balance: 1
+                            }
+                        }
+                    );
+
+                    res.status(200).send(updatedUser);
                 } catch (error) {
                     await session.abortTransaction();
                     session.endSession();
                     res.status(500).send({ message: 'Transaction failed', error });
+                }
+            } catch (error) {
+                res.status(500).send({ message: 'Server error', error });
+            }
+        });
+
+        // Cashout
+        app.post('/cash-out', verifyToken, async (req, res) => {
+            const { amount, agentEmail, pin } = req.body;
+            const { id } = req.decoded;
+
+            try {
+
+                const user = await usersCollection.findOne({ _id: new ObjectId(id) });
+                const agent = await usersCollection.findOne({ email: agentEmail });
+
+                if (!agent || agent.status !== 'active' || agent.role !== 'agent') {
+                    return res.status(404).send({ message: 'Agent not found or not authorized' });
+                }
+
+                const isMatch = await bcrypt.compare(pin.toString(), user.pin);
+                if (!isMatch) {
+                    return res.status(400).json({ status: 'error', message: 'Invalid Pin' });
+                }
+
+                const fee = Number(amount) * 0.015;
+                const totalDeduction = Number(amount) + fee;
+
+                if (user.balance < totalDeduction) {
+                    return res.status(406).send({ message: 'Insufficient balance' });
+                }
+
+                const session = client.startSession();
+                session.startTransaction();
+
+                try {
+                    const userBalance = user.balance - totalDeduction;
+                    const agentBalance = agent.balance + totalDeduction;
+
+                    await usersCollection.updateOne(
+                        { _id: new ObjectId(id) },
+                        { $set: { balance: userBalance } }
+                    );
+
+                    await usersCollection.updateOne(
+                        { email: agentEmail },
+                        { $set: { balance: agentBalance } }
+                    );
+
+                    const generateTransactionId = () => {
+                        const chars = '0123456789';
+                        let transId = '';
+                        for (let i = 0; i < 10; i++) {
+                            transId += chars.charAt(Math.floor(Math.random() * chars.length));
+                        }
+                        return transId;
+                    };
+
+                    const transactionID = generateTransactionId();
+
+                    const transaction = {
+                        senderInfo: {
+                            name: user.name,
+                            email: user.email,
+                            phoneNum: user.phoneNum,
+                        },
+                        receiverInfo: {
+                            name: agent.name,
+                            email: agent.email,
+                            phoneNum: agent.phoneNum,
+                        },
+                        amount,
+                        fee,
+                        transactionType: 'cash-out',
+                        transactionId: transactionID,
+                        status: 'success',
+                        createdAt: new Date()
+                    };
+
+                    await transactionsCollection.insertOne(transaction);
+
+                    await session.commitTransaction();
+                    session.endSession();
+
+                    const updatedUser = await usersCollection.findOne(
+                        { _id: new ObjectId(id) },
+                        {
+                            projection: {
+                                id: 1,
+                                name: 1,
+                                email: 1,
+                                phoneNum: 1,
+                                role: 1,
+                                photoUrl: 1,
+                                status: 1,
+                                balance: 1
+                            }
+                        }
+                    );
+
+                    res.status(200).send(updatedUser);
+                } catch (error) {
+                    await session.abortTransaction();
+                    session.endSession();
+                    res.status(500).send({ message: 'Server error', error });
                 }
             } catch (error) {
                 res.status(500).send({ message: 'Server error', error });
@@ -390,7 +512,7 @@ async function run() {
 
         // Get User Transactions
         app.get('/user-transactions', verifyToken, async (req, res) => {
-            const { id,role } = req.decoded;
+            const { id, role } = req.decoded;
 
             try {
                 if (role === 'agent') {
@@ -411,7 +533,7 @@ async function run() {
                     }).sort({ createdAt: -1 }).limit(20).toArray();
                     return res.status(200).send(userTransactions);
                 }
-                
+
             } catch (error) {
                 res.status(500).send({ message: 'Server error', error });
             }
